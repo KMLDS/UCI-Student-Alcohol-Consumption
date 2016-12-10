@@ -1,0 +1,100 @@
+---
+title: "UCI Student Alcohol Consumption"
+author: "Kevin Lyons"
+date: "November 30, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(dplyr)
+library(knitr)
+library(car)
+library(ggplot2)
+```
+
+Here we look at the effect of a number of different variables (including alcohol consumption) on the grades of Portugese students from two different schools using a dataset found on the [UCI Machine Learning Repository](http://archive.ics.uci.edu/ml/datasets/STUDENT+ALCOHOL+CONSUMPTION).  
+
+There are two separate data files which correspond to data and grades for students 
+```{r importData}
+mathData <- read.csv2('Data/student/student-mat.csv')
+kable(summary(mathData))
+
+portugeseData <- read.csv2('Data/student/student-por.csv')
+kable(summary(portugeseData))
+```
+
+The names of the features are explained in the file `Data/student.csv`. 
+
+These datasets do not have the same number of observations or the same summary statistics, so there is not a one to one correspondence between the students in each data frame.  If we are interested in making comparisons between the two however, the documentation for this data suggests there are students in common to both and they can be found by having identical values for each feature.
+
+In this work we will be primarily interested in the importance of each feature in our model (as opposed to say, maximizing the prediction accuracy on some test set unseen by an algorithm in training).  As a result, we must restrict our attention to algorithms with outputs which can be readily interpreted (*e.g.* linear models, random forests, *etc.*), and we must remove any potential multicolinearity in the data to get reliable estimates of the model parameters.
+```{r featureSelection}
+kable(cor(select_if(mathData, is.numeric)))
+kable(cor(select_if(portugeseData, is.numeric)))
+```
+
+In each case the student grades `G1`, `G2`, and `G3` are hightly correlated, so we will retain only one of them.  The mother's eduction level `Medu` and father's education level `Fedu` are also correlated.  For this we will create a new feature `edu <- max(Medu, Fedu)` and elminate the original two features from the data frame.
+```{r removeCorrelatedPairs}
+removePairs <- function(df) {
+  df$G1 <- NULL
+  df$G2 <- NULL
+  df$edu <- df$Medu
+  df$edu[df$Fedu > df$Medu] <- df$Fedu[df$Fedu > df$Medu]
+  df$Medu <- NULL
+  df$Fedu <- NULL
+  return(df)
+}
+
+mathData <- removePairs(mathData)
+portugeseData <- removePairs(portugeseData)
+```
+
+We can gain some quick insights by performing a simple linear regression:
+```{r simpleLinearModel}
+mathLR <- lm(G3 ~ ., data = mathData)
+summary(mathLR)
+vif(mathLR)
+```
+
+The variance inflation factor (VIF) indicates multicolinearity should not be a big problem with this dataset.  However, the summary data shows that most of the features are not helpful (at least for a linear regression), so we can try a model with most features removed:
+```{r reducedLinearModel}
+reducedMathLR <- lm(G3 ~ sex + age + studytime + failures + schoolsup + famsup + romantic + goout + absences + edu, data = mathData)
+summary(reducedMathLR)
+```
+
+Interestingly, our initial analysis doesn't show alcohol use to be a significant factor in students' grades.  The presence of failed classes, parents' education level, student social tendencies, and gender appear most important at first glance.
+
+## Feature Selection
+
+There are a few reasonable choices for feature selection in order to remove unimportant ones.  Here we will look at forward stepwise subset selection and the lasso.
+
+### Forward stepwise selection
+We will use the `leaps` library implementation of subset selection for this part.  Here we will compare Mallow's $C_p$ for models containing anywhere between 1 and all 38 possible variables and plot the results.  
+
+```{r forwardStepwise}
+library(leaps)
+mathStepwiseFit <- regsubsets(G3 ~ ., data = mathData, method = 'forward', nvmax = 38)
+portugeseStepwiseFit <- regsubsets(G3 ~ ., data = portugeseData, method = 'forward', nvmax = 38)
+stepwiseFits <- data.frame(1:38, summary(mathStepwiseFit)$cp, summary(portugeseStepwiseFit)$cp)
+names(stepwiseFits) <- c("NumFeatures", "mathCp", "portugeseCp")
+ggplot(stepwiseFits, aes(NumFeatures, mathCp)) +
+  geom_line(color = "orange") +
+  geom_vline(xintercept = which.min(stepwiseFits$mathCp), color = "blue")
+
+ggplot(stepwiseFits, aes(NumFeatures, portugeseCp)) +
+  geom_line(color = "orange") +
+  geom_vline(xintercept = which.min(stepwiseFits$portugeseCp), color = "blue")
+```
+
+In both cases, forward stepwise selection chooses a 15 parameter model, however they are not the same features for each data set:
+
+```{r}
+coef(mathStepwiseFit, 15)
+coef(portugeseStepwiseFit, 15)
+```
+
+The only alcohol-related feature remaining is workday drinking for the Portugese data.  Workday drinking has no clear effect on math scores from the data given, we cannot claim weekend drinking has an effect on either language or math grades with this analysis.
+
+### The lasso
